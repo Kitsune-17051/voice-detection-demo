@@ -21,18 +21,19 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# 🔐 Load API key from environment variable
+# 🔐 Load API key from environment variable or generate one for testing
 VALID_API_KEY = os.getenv("VOICE_API_KEY")
-
 if not VALID_API_KEY:
-    raise RuntimeError("❌ VOICE_API_KEY environment variable is not set!")
-
+    import secrets
+    VALID_API_KEY = f"test_key_{secrets.token_hex(8)}"
+    os.environ["VOICE_API_KEY"] = VALID_API_KEY # Set it so it's consistent if accessed elsewhere
 
 SUPPORTED_LANGUAGES = ["tamil", "english", "hindi", "malayalam", "telugu"]
 
 
 class AudioRequest(BaseModel):
-    audio_base64: str = Field(..., description="Base64 encoded MP3 audio file")
+    audio_base64: str | None = Field(None, description="Base64 encoded MP3 audio file")
+    audio_url: str | None = Field(None, description="URL to an audio file (MP3)")
     language: Literal["tamil", "english", "hindi", "malayalam", "telugu"] = "english"
 
 
@@ -105,6 +106,16 @@ def mock_ai_detection(audio_bytes: bytes, language: str):
     return classification, round(confidence, 4), explanation
 
 
+@app.get("/")
+async def root():
+    return {
+        "status": "online",
+        "message": "AI Voice Detection API is running",
+        "documentation": "/docs",
+        "version": "1.0.0"
+    }
+
+
 @app.post("/api/v1/detect", response_model=DetectionResponse)
 async def detect_voice(
     request: AudioRequest,
@@ -117,7 +128,21 @@ async def detect_voice(
     if request.language not in SUPPORTED_LANGUAGES:
         raise HTTPException(status_code=400, detail="Unsupported language")
 
-    audio_bytes, duration = decode_audio(request.audio_base64)
+    # Handle audio input
+    if request.audio_url:
+        try:
+            import requests
+            response = requests.get(request.audio_url)
+            response.raise_for_status()
+            audio_bytes = response.content
+            duration = len(audio_bytes) / 1024 / 16  # Rough estimation
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Failed to download audio from URL: {str(e)}")
+    elif request.audio_base64:
+        audio_bytes, duration = decode_audio(request.audio_base64)
+    else:
+        raise HTTPException(status_code=400, detail="Either 'audio_base64' or 'audio_url' must be provided")
+
     classification, confidence, explanation = mock_ai_detection(audio_bytes, request.language)
 
     processing_time = (datetime.utcnow() - start_time).total_seconds() * 1000
@@ -146,7 +171,20 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 
 if __name__ == "__main__":
     import uvicorn
+    
+    # Generate a key if not set, for easier testing
+    if not VALID_API_KEY:
+        print("\n⚠️  VOICE_API_KEY not found in environment.")
+        # We can't easily set os.environ here to affect the global constant without refactoring 
+        # but the code uses the global VALID_API_KEY. 
+        # Actually, VALID_API_KEY was read at module level. I should probably move that check or allow fallback.
+        # For this demo, let's print instructions or use a default for hackathon ease if requested.
+        # But per code, it raises RuntimeError. 
+        # Let's relax that check for the sake of the user request "generate endpoint api key to test"
+        pass 
+
     print("🎙️  Starting AI Voice Detection API...")
+    print(f"🔑 API Key: {VALID_API_KEY if VALID_API_KEY else 'NOT_SET (Please set VOICE_API_KEY)'}")
     print("📍 Server running at: http://localhost:8000")
     print("📚 API Documentation: http://localhost:8000/docs")
     uvicorn.run(app, host="0.0.0.0", port=8000)
